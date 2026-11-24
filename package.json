@@ -1,0 +1,26 @@
+{
+  "name": "science-diagram-maker",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "directories": {
+    "test": "test"
+  },
+  "scripts": {
+    "test": "node --test test/checks.test.js",
+    "start": "node src/server.js",
+    "generate": "node scripts/generate-all.js",
+    "table": "node scripts/readme-table.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "dependencies": {
+    "@xmldom/xmldom": "^0.9.12",
+    "express": "^5.3.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
