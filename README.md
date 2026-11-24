@@ -66,13 +66,13 @@ Generated with `gemini-3.5-flash-lite`. `npm run table` prints this table from `
 
 | # | Concept | Result | Failed checks (final) | Cost (USD, est.) | Retries | Tokens in/out |
 |---|---------|--------|-----------------------|------------------|---------|---------------|
-| 1 | Pythagoras' theorem | PASS | – | $0.01289 | 1 | 3539/4733 |
-| 2 | Parts of a circle | PASS | – | $0.00961 | 1 | 2566/3535 |
-| 3 | Series circuit | PASS | – | $0.00621 | 0 | 344/2441 |
-| 4 | Photosynthesis | PASS | – | $0.00850 | 0 | 336/3358 |
-| 5 | States of matter | PASS | – | $0.00884 | 0 | 350/3493 |
+| 1 | Pythagoras' theorem | PASS | – | $0.01278 | 1 | 3772/4660 |
+| 2 | Parts of a circle | PASS | – | $0.01410 | 1 | 4022/5159 |
+| 3 | Series circuit | PASS | – | $0.00679 | 0 | 601/2642 |
+| 4 | Photosynthesis | PASS | – | $0.00890 | 0 | 593/3489 |
+| 5 | States of matter | PASS | – | $0.00795 | 0 | 607/3107 |
 
-**Total estimated cost: $0.04604.** All five final SVGs pass all five checks. Concepts 1 and 2 needed one check-failure retry; 3–5 passed on the first call. No 429/503 API waits were needed in this run.
+**Total estimated cost: $0.05052.** All five final SVGs pass all six checks. Concepts 1 and 2 needed one check-failure retry; 3–5 passed on the first call. Concept 2 hit one 503 and concept 5 hit two 503s; the client waited and retried automatically (shown as "API waits" in the UI). No call permanently failed.
 
 ## What failed, and how I fixed it
 
@@ -84,15 +84,17 @@ Problems found by the **unit tests while building** (real, not guessed):
 
 Problems with the **model output**, copied from `firstAttemptChecks` in `results.json`:
 
-- **Concept 1:** first attempt had `<rect> spans x 150..300, y 360..510` outside `viewBox="0 0 800 500"`. Check `inside_viewbox` failed; the retry with that exact message produced a diagram inside the viewBox. PASS after 1 retry.
-- **Concept 2:** first attempt was flagged `unsafe or external content: external CSS reference`. Check `safe_content` failed; the retry removed it. PASS after 1 retry.
-- Concepts 3–5 passed on the first call.
+- **Concept 1:** first attempt had two clipped captions — `text "In any right-angled triangle" spans x -45.4..845.4` and `text "If a = 3 cm and b = 4 cm, th" spans x -11.8..811.8` in an 800-wide viewBox. `inside_viewbox` failed because I now estimate text width instead of checking only the anchor point. The retry with that exact message produced short, fitting labels. PASS after 1 retry.
+- **Concept 2:** first attempt was not valid XML (`NamespaceError: prefix is non-null and namespace is null`, i.e. a prefix such as `xlink:` without its namespace declaration). All six checks were skipped, then the retry with that error produced clean XML. PASS after 1 retry, plus one 503 wait.
+- Concepts 3–5 passed on the first call. Concept 5 needed two 503 retries before its first successful call.
+
+I also re-ran generation a few times while tightening the prompt (free-tier output varies). Every run follows the same rule — one call, and at most one retry with the exact failure reasons — and `results.json` keeps only the final passing set. During that process I fixed a diagram that showed literal `$V_{total}$` and another that drew photosynthesis products flowing into the plant; the new `plain_text_labels` check and a stronger direction rule in the prompt prevent those.
 
 ## What I would do with one more day
 
 - Render each SVG in a headless browser and compare screenshots to catch overlapping labels and text wider than its box. The viewBox check only sees text anchor points, not glyph widths.
 - Prove the animation actually changes the picture between two frames, rather than trusting an animation tag.
-- Add a "plain-text labels" check for literal LaTeX (`$I$`, `V_{total}`) and re-generate until GCSE-friendly Unicode is used everywhere.
+- Add semantic checks for leader lines and arrow direction — e.g. verify a "radius" leader actually ends on the circle edge and that product arrows point away from the plant. These are currently handled by the prompt and human review, not by code.
 - Use structured output to separate SVG from chatter, test several free models side by side, and run each concept several times to measure pass rate.
 - Move reviews to a real database with reviewer names and an audit trail.
 
