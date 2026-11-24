@@ -11,4 +11,4 @@ services:
       - key: GEMINI_MODEL
         value: gemini-3.5-flash-lite
       - key: NODE_VERSION
-        value: "22"
+        value: "22.14.0"   # supports --env-file-if-exists; the real key is set in the Render dashboard
