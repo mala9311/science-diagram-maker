@@ -2,8 +2,8 @@
 
 Udhi Technologies home assignment. A small Node/Express app that asks a free Gemini model for five animated SVG science diagrams, validates every SVG with real code, saves the results, and lets a reviewer approve or reject each one.
 
-- **Live app:** _to be added after deployment_ (see [Deploy](#deploy))
-- **GitHub repo:** _to be added after the first push_
+- **Live app:** https://science-diagram-maker-pg6w.onrender.com
+- **GitHub repo:** https://github.com/mala9311/science-diagram-maker
 - **Model:** `gemini-3.5-flash-lite` (free tier). Change with `GEMINI_MODEL`.
 - **Stack:** Node 20+, Express, plain HTML/CSS/JS, `@xmldom/xmldom`, Gemini REST API.
 
@@ -106,11 +106,14 @@ I also re-ran generation a few times while tightening the prompt (free-tier outp
 
 ## Deploy
 
-Free hosting with Render (a `render.yaml` is included):
+The app is deployed on **Render's free Node plan**: https://science-diagram-maker-pg6w.onrender.com
 
-1. Push this repo to GitHub (`.gitignore` already excludes `.env`, `node_modules` and `data/`).
-2. Render → New → Web Service → pick the repo. The blueprint sets `npm install` / `npm start`, Node 22 and the model name.
-3. In Render's Environment tab add `GEMINI_API_KEY` as a secret. **Never put the key in code or commit it.**
-4. Open the service URL. The five saved results show immediately with no model call; only pressing Generate uses the key.
+- The service is linked to the `main` branch of this GitHub repo and auto-deploys on every push.
+- `render.yaml` documents the build (`npm install`) and start (`npm start`) commands, the free plan, and the model name.
+- `GEMINI_API_KEY` is set only as a secret environment variable in Render's dashboard. It is never in code, `.env`, or Git. `.env` and `data/` are git-ignored.
+- `NODE_VERSION=22.14.0` is set so the npm scripts can use Node's built-in `--env-file-if-exists=.env`.
+- The five saved results load from `results.json` with no model call; pressing Generate uses the server-side key.
+
+Verified after deployment: `/`, `/styles.css`, `/app.js` and `/api/results` all return 200; the page renders 5 diagrams and 30 check pills (6 checks each); a live Generate for concept 1 returned a passing SVG after one check retry and two 503 waits.
 
 The same app also runs on Vercel (as a Node service), Hugging Face Spaces (Docker/Node SDK) or any host that runs `npm start`.
