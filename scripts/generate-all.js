@@ -16,7 +16,7 @@ for (const c of CONCEPTS.filter((c) => !only.length || only.includes(c.id))) {
   try {
     const r = await generateDiagram(c);
     byId.set(c.id, r);
-    console.log(`#${c.id} ${c.title}: ${r.passed ? 'PASS' : 'FAIL'} | in ${r.inputTokens} out ${r.outputTokens} tokens | $${r.costUsd} | retries ${r.retries} | api waits ${r.apiRetries}`);
+    console.log(`#${c.id} ${c.title}: ${r.passed ? 'PASS' : 'FAIL'} | model ${r.model} | in ${r.inputTokens} out ${r.outputTokens} tokens | $${r.costUsd} | retries ${r.retries} | api waits ${r.apiRetries}`);
     for (const k of r.checks) console.log(`     ${k.passed ? '✓' : '✗'} ${k.name}: ${k.detail}`);
   } catch (e) {
     console.error(`#${c.id} ${c.title}: API ERROR - ${e.message}`);

@@ -12,10 +12,10 @@ const GOOD = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 500"><tit
 <text x="10" y="30">a</text><text x="10" y="60">b</text><text x="10" y="90">c</text></svg>`;
 const byName = (checks, n) => checks.find((c) => c.name === n);
 
-test('good svg passes all 5 checks', () => {
+test('good svg passes all 6 checks', () => {
   const r = validateSvg(GOOD);
   assert.ok(allPassed(r), JSON.stringify(r.filter((c) => !c.passed)));
-  assert.equal(r.length, 5);
+  assert.equal(r.length, 6);
 });
 
 test('extracts svg from fenced, chatty reply', () => {
@@ -26,7 +26,7 @@ test('extracts svg from fenced, chatty reply', () => {
 test('unparseable / truncated svg fails parse and marks the rest skipped', () => {
   const r = validateSvg(GOOD.replace('</svg>', '').replace('<title>Test</title>', '<title>Test'));
   assert.equal(byName(r, 'parses').passed, false);
-  assert.equal(r.filter((c) => !c.passed).length, 5);
+  assert.equal(r.filter((c) => !c.passed).length, 6);
 });
 
 test('missing xmlns fails parse', () => {
@@ -44,6 +44,13 @@ test('missing viewBox fails', () => {
   assert.equal(byName(validateSvg(GOOD.replace(' viewBox="0 0 800 500"', '')), 'inside_viewbox').passed, false);
 });
 
+test('estimated text width outside viewBox fails, and scale transforms are bounded', () => {
+  const longText = GOOD.replace('<text x="10" y="30">a</text>', '<text x="790" y="30">This label is far too long</text>');
+  assert.equal(byName(validateSvg(longText), 'inside_viewbox').passed, false);
+  const scaled = GOOD.replace('<circle', '<g transform="scale(2)"><circle').replace('</circle>', '</circle></g>');
+  assert.equal(byName(validateSvg(scaled), 'inside_viewbox').passed, false);
+});
+
 test('needs title and 3 labels', () => {
   assert.equal(byName(validateSvg(GOOD.replace('<title>Test</title>', '')), 'title_and_labels').passed, false);
   assert.equal(byName(validateSvg(GOOD.replace('<text x="10" y="90">c</text>', '')), 'title_and_labels').passed, false);
@@ -57,6 +64,12 @@ test('animation: none fails, SMIL passes, CSS needs keyframes AND use', () => {
   assert.equal(byName(validateSvg(css), 'has_animation').passed, true);
   const unused = none.replace('<rect', '<style>@keyframes s{to{opacity:0}}</style><rect');
   assert.equal(byName(validateSvg(unused), 'has_animation').passed, false);
+});
+
+test('plain_text_labels rejects literal LaTeX in labels', () => {
+  const latex = GOOD.replace('<text x="10" y="30">a</text>', '<text x="10" y="30">Current ($I$)</text>');
+  assert.equal(byName(validateSvg(latex), 'plain_text_labels').passed, false);
+  assert.match(byName(validateSvg(latex), 'plain_text_labels').detail, /literal \$/);
 });
 
 test('safe_content rejects scripts, handlers, external hrefs', () => {

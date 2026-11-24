@@ -33,32 +33,51 @@ app.put('/api/reviews/:id', async (req, res) => {
   if (!getConcept(id)) return res.status(404).json({ error: 'Unknown concept id.' });
   if (!['approved', 'rejected', null].includes(decision)) return res.status(400).json({ error: 'decision must be "approved", "rejected" or null.' });
   const all = await readJson(REVIEWS_FILE, {});
-  all[id] = { decision, note: String(note ?? '').slice(0, 2000), updatedAt: new Date().toISOString() };
+  const stamp = (v) => (typeof v === 'string' && !Number.isNaN(Date.parse(v)) ? new Date(v).toISOString() : null);
+  all[id] = {
+    decision,
+    note: String(note ?? '').slice(0, 2000),
+    updatedAt: new Date().toISOString(),
+    noteUpdatedAt: stamp(req.body?.noteUpdatedAt) || new Date().toISOString(),
+    decisionUpdatedAt: stamp(req.body?.decisionUpdatedAt) || null,
+  };
   await fs.mkdir(path.dirname(REVIEWS_FILE), { recursive: true });
   await fs.writeFile(REVIEWS_FILE, JSON.stringify(all, null, 2));
   res.json(all[id]);
 });
 
-// Live generation for ONE concept. One at a time, and capped per hour, so a visitor can't drain the free quota.
+// Live generation for ONE concept. One at a time, capped per visitor AND globally,
+// so one visitor cannot drain the free quota for the reviewers.
 let busy = false;
-const hits = [];
+const hitsByIp = new Map();
 const LIMIT_PER_HOUR = Number(process.env.GENERATE_LIMIT_PER_HOUR || 20);
+const GLOBAL_LIMIT_PER_HOUR = Number(process.env.GENERATE_GLOBAL_LIMIT_PER_HOUR || 100);
+
+function recentHits(map, key, now) {
+  const hits = (map.get(key) || []).filter((t) => now - t <= 3_600_000);
+  map.set(key, hits);
+  return hits;
+}
 
 app.post('/api/generate', async (req, res) => {
   const concept = getConcept(req.body?.id);
   if (!concept) return res.status(400).json({ error: 'Send {"id": 1-5}.' });
   if (!process.env.GEMINI_API_KEY) return res.status(503).json({ error: 'The server has no GEMINI_API_KEY set, so live generation is switched off. The 5 saved results still work.' });
   const now = Date.now();
-  while (hits.length && now - hits[0] > 3_600_000) hits.shift();
-  if (hits.length >= LIMIT_PER_HOUR) return res.status(429).json({ error: 'Live generation limit reached for this hour. Please try again later.' });
+  const ip = req.ip || req.socket.remoteAddress || 'unknown';
+  const mine = recentHits(hitsByIp, ip, now);
+  const total = [...hitsByIp.values()].flatMap((list) => list.filter((t) => now - t <= 3_600_000)).length;
+  if (mine.length >= LIMIT_PER_HOUR) return res.status(429).json({ error: 'You have reached the live generation limit for this hour. Please try again later.' });
+  if (total >= GLOBAL_LIMIT_PER_HOUR) return res.status(429).json({ error: 'The shared generation limit for this hour has been reached. Please try again later.' });
   if (busy) return res.status(429).json({ error: 'Another diagram is being generated. Wait for it to finish, then try again.' });
   busy = true;
-  hits.push(now);
+  mine.push(now);
   try {
     const result = await generateDiagram(concept);
+    console.log(`[generate] live concept ${concept.id} model=${result.model} cost=$${result.costUsd} retries=${result.retries} apiRetries=${result.apiRetries}`);
     res.json({ result });
   } catch (e) {
-    const status = e.status === 429 || e.status === 503 ? e.status : e.status >= 400 && e.status < 600 ? 502 : 502;
+    const status = e.status === 429 || e.status === 503 ? e.status : 502;
     res.status(status).json({ error: e.message, apiRetries: e.apiRetries ?? 0 });
   } finally {
     busy = false;

@@ -12,7 +12,9 @@ Hard requirements (they are checked by code):
 - At least one animation that helps explain the idea, using SMIL (<animate>, <animateTransform>, <animateMotion>) or CSS @keyframes inside a <style> element. Animation must loop or run on repeat.
 - No <script>, no event attributes (onclick etc.), no <foreignObject>, no <image>, no external links or fonts.
 
-Quality: scientifically correct and clear for a teenager. Use a white or very light background rect, strong contrast, and colour with purpose. Do not overlap labels or let a caption sit on top of a shape. Animate the idea itself (e.g. things that move, grow or highlight in sequence), not just decoration. Write all text as plain text. Never use LaTeX or dollar signs; for maths use Unicode characters such as a², b², c² and a² + b² = c².`;
+Quality: scientifically correct and clear for a teenager. Use a white or very light background rect, strong contrast, and colour with purpose. Keep every label inside its panel and inside the viewBox; estimate text width as font-size x 0.58 x character count before placing it. Do not overlap labels or let a caption sit on top of a shape. Animate the idea itself (e.g. things that move, grow or highlight in sequence), not just decoration.
+
+Text rule: plain Unicode only. NEVER write a dollar sign, underscore, curly brace or LaTeX command. Write a² + b² = c², I, V₁, V₂, V total, CO₂, O₂ — never "$I$", "V_{total}" or "V_1". Labels of parts must point to the real part: leader lines must end on the centre/radius/etc. Arrows must show the real direction (inputs into a plant, products out of it). Conventional current and electron flow are opposite; do not describe them as the same.`;
 
 const userPrompt = (c) =>
   `Draw one animated SVG diagram for this ${c.subject} concept: "${c.title}".\n\nText to teach:\n${c.text}`;
@@ -39,7 +41,7 @@ export async function generateDiagram(concept, { call = callGemini, model = DEFA
     const svg = extractSvg(res.text);
     const checks = validateSvg(svg);
     attempts.push({ svg, checks, finishReason: res.finishReason });
-    log(`[${concept.slug}] attempt ${n + 1}: ${checks.filter((c) => c.passed).length}/${checks.length} checks passed`);
+    log(`[${concept.slug}] attempt ${n + 1}: ${checks.filter((c) => c.passed).length}/${checks.length} checks passed: ${checks.map((c) => `${c.name}=${c.passed ? 'pass' : 'fail'}`).join(' ')} | in ${res.inputTokens} out ${res.outputTokens} tokens | est $${estimateCost(res.inputTokens, res.outputTokens).toFixed(6)}`);
     if (allPassed(checks) || n === 1) break;
     // retry once, telling the model exactly what failed
     contents.push({ role: 'model', parts: [{ text: svg || res.text || '(empty reply)' }] });
@@ -49,6 +51,14 @@ export async function generateDiagram(concept, { call = callGemini, model = DEFA
   // keep the final attempt unless the first one was strictly better
   const score = (a) => a.checks.filter((c) => c.passed).length;
   const best = attempts.length === 2 && score(attempts[0]) > score(attempts[1]) ? attempts[0] : attempts[attempts.length - 1];
+
+  // One structured line per concept: everything the assignment asks us to log.
+  log(`[result] ${JSON.stringify({
+    concept: concept.slug, model, inputTokens, outputTokens,
+    costUsd: Number(estimateCost(inputTokens, outputTokens).toFixed(6)),
+    retries: attempts.length - 1, apiRetries,
+    checks: best.checks.map((c) => ({ name: c.name, passed: c.passed, detail: c.detail })),
+  })}`);
 
   return {
     id: concept.id,

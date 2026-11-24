@@ -3,7 +3,7 @@
 import { DOMParser } from '@xmldom/xmldom';
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
-export const CHECK_NAMES = ['parses', 'inside_viewbox', 'title_and_labels', 'has_animation', 'safe_content'];
+export const CHECK_NAMES = ['parses', 'inside_viewbox', 'title_and_labels', 'has_animation', 'safe_content', 'plain_text_labels'];
 
 /** Pull the <svg>...</svg> out of a model reply (it may add ``` fences or chatter). */
 export function extractSvg(raw) {
@@ -53,21 +53,80 @@ function* walk(node) {
 
 const textOf = (el) => (el.textContent || '').replace(/\s+/g, ' ').trim();
 
-/** Sum of translate(...) on this element and its ancestors. Returns null if a non-translate transform is present. */
-function translateOf(el) {
-  let tx = 0, ty = 0;
-  for (let n = el; n && n.nodeType === 1; n = n.parentNode) {
-    const t = n.getAttribute && n.getAttribute('transform');
-    if (!t) continue;
-    const parts = [...t.matchAll(/(\w+)\s*\(([^)]*)\)/g)];
-    for (const [, fn, args] of parts) {
-      if (fn !== 'translate') return null; // rotate/scale/matrix: can't bound statically, skip
-      const [x, y] = args.split(/[\s,]+/).filter(Boolean).map(Number);
-      tx += x || 0;
-      ty += y || 0;
+/** Font sizes declared in <style> rules, so text width can be estimated without a browser. */
+function cssFontRules(root) {
+  const rules = new Map();
+  for (const el of walk(root)) {
+    if (el.localName !== 'style') continue;
+    for (const [, selector, body] of textOf(el).matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
+      const size = body.match(/font-size\s*:\s*([\d.]+)\s*px/i);
+      if (!size) continue;
+      const sel = selector.trim().replace(/\s+/g, ' ');
+      if (sel.startsWith('.')) rules.set(sel.slice(1), Number(size[1]));
+      else if (/^[a-z]+$/i.test(sel)) rules.set(sel.toLowerCase(), Number(size[1]));
     }
   }
-  return { tx, ty };
+  return rules;
+}
+
+function fontSizeFor(el, rules) {
+  for (let n = el; n && n.nodeType === 1; n = n.parentNode) {
+    const attr = n.getAttribute && n.getAttribute('font-size');
+    if (attr != null) {
+      const v = parseFloat(attr);
+      if (Number.isFinite(v)) return v;
+    }
+    const cls = n.getAttribute && n.getAttribute('class');
+    if (cls) for (const name of cls.trim().split(/\s+/)) if (rules.has(name)) return rules.get(name);
+    if (n.localName && rules.has(n.localName.toLowerCase())) return rules.get(n.localName.toLowerCase());
+  }
+  return 16;
+}
+
+const corners = (b) => [[b.minX, b.minY], [b.maxX, b.minY], [b.minX, b.maxY], [b.maxX, b.maxY]];
+const wrap = (pts) => ({
+  minX: Math.min(...pts.map((p) => p[0])), maxX: Math.max(...pts.map((p) => p[0])),
+  minY: Math.min(...pts.map((p) => p[1])), maxY: Math.max(...pts.map((p) => p[1])),
+});
+
+/** Apply one SVG transform to a bounding box by transforming its four corners. */
+function applyTransform(b, fn, a) {
+  const rad = (deg) => (deg * Math.PI) / 180;
+  const point = ([x, y]) => {
+    switch (fn) {
+      case 'translate': return [x + (a[0] || 0), y + (a[1] || 0)];
+      case 'scale': return [x * (a[0] ?? 1), y * (a[1] ?? a[0] ?? 1)];
+      case 'rotate': {
+        const t = rad(a[0] || 0), cx = a[1] || 0, cy = a[2] || 0;
+        return [cx + (x - cx) * Math.cos(t) - (y - cy) * Math.sin(t), cy + (x - cx) * Math.sin(t) + (y - cy) * Math.cos(t)];
+      }
+      case 'matrix': {
+        const [m11 = 1, m12 = 0, m21 = 0, m22 = 1, dx = 0, dy = 0] = a;
+        return [m11 * x + m21 * y + dx, m12 * x + m22 * y + dy];
+      }
+      case 'skewx': return [x + Math.tan(rad(a[0] || 0)) * y, y];
+      case 'skewy': return [x, y + Math.tan(rad(a[0] || 0)) * x];
+      default: return [x, y];
+    }
+  };
+  return wrap(corners(b).map(point));
+}
+
+/** Bounding box after this element's own transform and every ancestor transform. */
+function transformedBounds(b, el) {
+  const chain = [];
+  for (let n = el; n && n.nodeType === 1; n = n.parentNode) chain.push(n);
+  let out = b;
+  for (const n of chain.reverse()) {
+    const t = n.getAttribute && n.getAttribute('transform');
+    if (!t) continue;
+    for (const [, fn, raw] of t.matchAll(/(\w+)\s*\(([^)]*)\)/g)) {
+      const args = raw.split(/[\s,]+/).filter(Boolean).map(Number);
+      if (args.some(Number.isNaN)) continue;
+      out = applyTransform(out, fn.toLowerCase(), args);
+    }
+  }
+  return out;
 }
 
 /** Rough bounding box of a path's d attribute (handles M L H V C S Q T A Z, abs + rel). */
@@ -105,7 +164,7 @@ function pathBounds(d) {
   return { minX: Math.min(...xs), maxX: Math.max(...xs), minY: Math.min(...ys), maxY: Math.max(...ys) };
 }
 
-function boundsOf(el) {
+function boundsOf(el, fontRules) {
   const g = (a, d) => num(el.getAttribute(a), d);
   switch (el.localName) {
     case 'rect': return { minX: g('x'), minY: g('y'), maxX: g('x') + g('width'), maxY: g('y') + g('height') };
@@ -121,9 +180,13 @@ function boundsOf(el) {
     }
     case 'path': return pathBounds(el.getAttribute('d') || '');
     case 'text': {
-      // anchor point only (glyph widths are unknowable without a renderer)
+      // Estimate glyph width from font-size (no browser here). Average sans-serif glyph ≈ 0.58 em.
       const x = num(el.getAttribute('x')), y = num(el.getAttribute('y'));
-      return { minX: x, maxX: x, minY: y, maxY: y };
+      const size = fontSizeFor(el, fontRules);
+      const width = Math.max(textOf(el).length, 1) * size * 0.58;
+      const anchor = (el.getAttribute('text-anchor') || 'start').toLowerCase();
+      const minX = anchor === 'middle' ? x - width / 2 : anchor === 'end' ? x - width : x;
+      return { minX, maxX: minX + width, minY: y - size * 0.82, maxY: y + size * 0.22 };
     }
     default: return null;
   }
@@ -138,24 +201,24 @@ function checkViewBox(root) {
   const [vx, vy, vw, vh] = vb;
   const tol = 1;
   const outside = [];
-  let checked = 0, skipped = 0;
+  const fontRules = cssFontRules(root);
+  let checked = 0;
   for (const el of walk(root)) {
-    if (el.localName === 'defs' || [...ancestors(el)].some((a) => ['defs', 'clipPath', 'mask', 'pattern', 'marker', 'symbol'].includes(a.localName))) continue;
-    const b = boundsOf(el);
+    if ([el, ...ancestors(el)].some((a) => ['defs', 'clipPath', 'mask', 'pattern', 'marker', 'symbol'].includes(a.localName))) continue;
+    const b = boundsOf(el, fontRules);
     if (!b) continue;
-    const t = translateOf(el);
-    if (!t) { skipped++; continue; }
     checked++;
-    const minX = b.minX + t.tx, maxX = b.maxX + t.tx, minY = b.minY + t.ty, maxY = b.maxY + t.ty;
+    const { minX, maxX, minY, maxY } = transformedBounds(b, el);
     if (minX < vx - tol || minY < vy - tol || maxX > vx + vw + tol || maxY > vy + vh + tol) {
-      outside.push(`<${el.localName}> spans x ${r(minX)}..${r(maxX)}, y ${r(minY)}..${r(maxY)}`);
+      const what = el.localName === 'text' ? `text "${textOf(el).slice(0, 28)}"` : `<${el.localName}>`;
+      outside.push(`${what} spans x ${r(minX)}..${r(maxX)}, y ${r(minY)}..${r(maxY)}`);
     }
   }
   const frame = `viewBox is ${vx} ${vy} ${vw} ${vh}`;
   if (outside.length) {
     return { passed: false, detail: `${outside.length} element(s) outside the viewBox (${frame}): ${outside.slice(0, 4).join('; ')}` };
   }
-  return { passed: true, detail: `${checked} shapes inside the viewBox (${frame})${skipped ? `, ${skipped} skipped (rotate/scale transform)` : ''}` };
+  return { passed: true, detail: `${checked} shapes inside the viewBox (${frame}), incl. estimated text widths` };
 }
 const r = (n) => Math.round(n * 10) / 10;
 function* ancestors(el) { for (let n = el.parentNode; n && n.nodeType === 1; n = n.parentNode) yield n; }
@@ -203,7 +266,23 @@ function checkSafe(root) {
     : { passed: true, detail: 'no scripts, event handlers, foreignObject or external references' };
 }
 
-/** Run all 5 checks. Always returns all five results, in CHECK_NAMES order. */
+// ---------- check 6 (my own): GCSE-friendly plain text labels ----------
+// A model often writes "$V_{total}$" even when told not to. Those dollar signs look wrong on a lesson slide.
+function checkPlainText(root) {
+  const labels = [...walk(root)]
+    .filter((el) => ['text', 'tspan', 'title'].includes(el.localName))
+    .map(textOf).join(' ');
+  const problems = [];
+  if (labels.includes('$')) problems.push('literal $ (LaTeX/markdown maths)');
+  if (/\\(?:frac|sqrt|times|cdot|alpha|beta|gamma|theta|pi|sum|rightarrow|mathrm|text|begin|end)\b/.test(labels)) problems.push('LaTeX command');
+  if (/[{}]/.test(labels)) problems.push('LaTeX braces');
+  if (/[A-Za-z]_\d/.test(labels)) problems.push('LaTeX-style subscript');
+  return problems.length
+    ? { passed: false, detail: `non-plain labels: ${[...new Set(problems)].join(', ')}` }
+    : { passed: true, detail: 'labels use plain Unicode text' };
+}
+
+/** Run all 6 checks. Always returns all results, in CHECK_NAMES order. */
 export function validateSvg(raw) {
   const svg = extractSvg(raw);
   const { doc, problems } = parseSvg(svg);
@@ -221,6 +300,7 @@ export function validateSvg(raw) {
     { name: 'title_and_labels', ...checkTitleAndLabels(root) },
     { name: 'has_animation', ...checkAnimation(root) },
     { name: 'safe_content', ...checkSafe(root) },
+    { name: 'plain_text_labels', ...checkPlainText(root) },
   ];
 }
 

@@ -8,6 +8,7 @@ const LABELS = {
   title_and_labels: 'Title + 3 labels',
   has_animation: 'Has animation',
   safe_content: 'Safe content (my check)',
+  plain_text_labels: 'Plain-text labels (my check)',
 };
 
 const state = {
@@ -24,6 +25,7 @@ const state = {
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const money = (n) => `$${Number(n || 0).toFixed(5)}`;
 const svgSrc = (svg) => `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
+const svgTitle = (svg) => esc((svg || '').match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1]?.replace(/<[^>]+>/g, '').trim() || 'diagram');
 
 // localStorage is a backup for review decisions if the free host restarts and loses its disk.
 const ls = {
@@ -104,7 +106,7 @@ function rowHtml(c) {
   const rv = state.reviews[c.id] || {};
   const st = state.statuses[c.id] || {};
   const diagram = r
-    ? `<button type="button" class="diagram-frame" data-action="view" data-id="${c.id}" aria-label="Open full diagram for ${esc(c.title)}"><img alt="Animated diagram: ${esc(c.title)}" src="${svgSrc(r.svg)}"></button>`
+    ? `<button type="button" class="diagram-frame" data-action="view" data-id="${c.id}" aria-label="Open full diagram for ${esc(c.title)}"><img alt="Animated diagram of ${esc(c.title)} (${svgTitle(r.svg)}), ${esc(c.subject)}" src="${svgSrc(r.svg)}"></button>`
     : '<div class="no-diagram">No saved result yet.<br>Press Generate.</div>';
   const stats = r ? `<div class="cost-main">${money(r.costUsd)}</div>
     <div class="cost-label">Est. cost · ${esc(r.model)}</div>
@@ -167,7 +169,12 @@ function updateReviewUi(tr, review) {
 }
 
 async function saveReview(id, patch, tr) {
-  const next = { ...(state.reviews[id] || {}), ...patch };
+  const now = new Date().toISOString();
+  const next = {
+    ...(state.reviews[id] || {}), ...patch, updatedAt: now,
+    ...('note' in patch ? { noteUpdatedAt: now } : {}),
+    ...('decision' in patch ? { decisionUpdatedAt: now } : {}),
+  };
   state.reviews[id] = next;
   ls.set('reviews', state.reviews);
   updateReviewUi(tr, next);
@@ -175,7 +182,12 @@ async function saveReview(id, patch, tr) {
     await api(`/api/reviews/${id}`, {
       method: 'PUT',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ decision: next.decision ?? null, note: next.note ?? '' }),
+      body: JSON.stringify({
+        decision: next.decision ?? null,
+        note: next.note ?? '',
+        noteUpdatedAt: next.noteUpdatedAt,
+        decisionUpdatedAt: next.decisionUpdatedAt,
+      }),
     });
   } catch (e) {
     $('.review-state', tr).textContent = `● Saved in this browser only (${e.message})`;
@@ -220,7 +232,7 @@ function openModal(id) {
   $('#modal-body').innerHTML = `<h2 id="modal-title">${esc(c?.title || r.concept)}</h2>
     <p class="modal-sub">${esc(c?.subject || r.subject)} · generated with ${esc(r.model)}</p>
     <div class="modal-grid">
-      <div class="modal-diagram"><img alt="Full animated diagram: ${esc(r.concept)}" src="${svgSrc(r.svg)}"></div>
+      <div class="modal-diagram"><img alt="Full animated diagram of ${esc(r.concept)}: ${svgTitle(r.svg)}" src="${svgSrc(r.svg)}"></div>
       <div class="modal-meta">
         <h3>Code checks</h3><ul class="checks">${checks}</ul>
         <h3>Run details</h3>
@@ -240,6 +252,25 @@ function openModal(id) {
 
 function closeModal() { $('#modal').hidden = true; }
 
+// Merge per field using the timestamp of the last change to that field, so a
+// newer browser note is not erased by an older server decision (or vice versa).
+function mergeReviews(local, server) {
+  const out = {};
+  for (const id of new Set([...Object.keys(local || {}), ...Object.keys(server || {})])) {
+    const a = local?.[id] || {}, b = server?.[id] || {};
+    const newerDecision = (b.decisionUpdatedAt || b.updatedAt || '') >= (a.decisionUpdatedAt || a.updatedAt || '');
+    const newerNote = (b.noteUpdatedAt || b.updatedAt || '') >= (a.noteUpdatedAt || a.updatedAt || '');
+    out[id] = {
+      decision: newerDecision ? (b.decision ?? a.decision) : (a.decision ?? b.decision),
+      note: newerNote ? (b.note ?? a.note) : (a.note ?? b.note),
+      noteUpdatedAt: newerNote ? (b.noteUpdatedAt || b.updatedAt) : (a.noteUpdatedAt || a.updatedAt),
+      decisionUpdatedAt: newerDecision ? (b.decisionUpdatedAt || b.updatedAt) : (a.decisionUpdatedAt || a.updatedAt),
+      updatedAt: (b.updatedAt || '') >= (a.updatedAt || '') ? b.updatedAt : a.updatedAt,
+    };
+  }
+  return out;
+}
+
 async function load() {
   try {
     const data = await api('/api/results');
@@ -248,7 +279,7 @@ async function load() {
     state.model = data.model || '';
     let server = {};
     try { server = await api('/api/reviews'); } catch { /* browser copy still works */ }
-    state.reviews = { ...ls.get('reviews', {}), ...server };
+    state.reviews = mergeReviews(ls.get('reviews', {}), server);
     render();
     if (!data.results.length) banner('No saved results found. Run npm run generate with a GEMINI_API_KEY, or press Generate live on a row.', 'info');
   } catch (e) {
@@ -275,10 +306,16 @@ document.addEventListener('click', async (e) => {
   }
 });
 
-document.addEventListener('change', (e) => {
+// Save notes while typing (debounced), so refresh without blurring cannot lose them.
+const noteTimers = new Map();
+document.addEventListener('input', (e) => {
   if (!e.target.matches('.note-input')) return;
   const tr = e.target.closest('tr[data-id]');
-  saveReview(Number(tr.dataset.id), { note: e.target.value }, tr);
+  const id = Number(tr.dataset.id);
+  state.reviews[id] = { ...(state.reviews[id] || {}), note: e.target.value };
+  ls.set('reviews', state.reviews);
+  clearTimeout(noteTimers.get(id));
+  noteTimers.set(id, setTimeout(() => saveReview(id, { note: e.target.value }, tr), 400));
 });
 
 $('#search').addEventListener('input', (e) => { state.query = e.target.value; render(); });
